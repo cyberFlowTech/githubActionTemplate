@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: SERVICE_NAME-service
+  namespace: PROJECT_NAME-ENVIRONMENT
+spec:
+  type: ClusterIP
+  selector:
+    app: SERVICE_NAME
+  ports:
+    - port: 8080
+      name: SERVICE_NAME
+      targetPort: SERVICE_NAME
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: SERVICE_NAME-deployment
+  namespace: PROJECT_NAME-ENVIRONMENT
+spec:
+  strategy:
+    rollingUpdate:
+      maxSurge: 50%
+      maxUnavailable: 50%
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: SERVICE_NAME
+  replicas: 1 # 生产环境第一次发版默认副本数为1
+  template:
+    metadata:
+      namespace: PROJECT_NAME-ENVIRONMENT
+      name: SERVICE_NAME
+      labels:
+        app: SERVICE_NAME
+      annotations:
+
+        # 开发者维护: 
+        # 三种日志级别debug/info/err的promtail标签, 对应promtail中配置的pod层级自动发现采集日志
+        # 配置由pod映射到宿主机器的日志路径
+        # loki.io/debugfile: /var/data/PROJECT_NAME-ENVIRONMENT/SERVICE_NAME/debug.log
+        loki.io/logfile: /var/data/PROJECT_NAME-ENVIRONMENT/SERVICE_NAME/info.log
+        # loki.io/errfile: /var/data/PROJECT_NAME-ENVIRONMENT/SERVICE_NAME/err.log
+        
+        # 开发者维护: 
+        # 业务代码指标采集,需在业务代码中实现指标采集
+        # prometheus.io/path: /metrics
+        # prometheus.io/port: '9091'
+        # prometheus.io/scrape: 'true'
+        
+    spec:
+      imagePullSecrets:
+        - name: AWS_REGISTRY_KEY_NAME
+
+      # 开发者维护: 节点亲和性,用来部署到/排除特定的eks节点
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #       - matchExpressions:
+      #         - key: kubernetes.io/hostname
+      #           operator: NotIn
+      #           values:
+      #           - ip-172-31-29-208.ap-southeast-1.compute.internal 
+      #           - ip-172-31-47-198.ap-southeast-1.compute.internal
+
+      containers:
+        - image: ECR_REGISTRY/SERVICE_NAME:TAG_NAME
+          name: SERVICE_NAME
+          imagePullPolicy: Always # 由于image的tag添加了github.sha,每次镜像都会不同
+          
+          ports:
+            # 开发者维护: 与内部服务端口相同,无映射关系
+            # 注意在Dockerfile中开放此端口
+            - name: SERVICE_NAME
+              containerPort: 8888
+
+          volumeMounts:
+            # 开发者维护: pod中的日志路径
+            - name: log
+              mountPath: /Logs
+            # 开发者维护: pod中的配置路径
+            - name: config
+              mountPath: /Config
+
+          # 开发者维护: 存活检测探针
+          # livenessProbe:
+          #   httpGet:
+          #     path: /ping
+          #     port: 8888
+          #   initialDelaySeconds: 10
+          #   timeoutSeconds: 3
+          #   periodSeconds: 10
+          #   successThreshold: 1
+          #   failureThreshold: 3
+
+          # 开发者维护: 可根据实际情况调整资源大小
+          resources:
+            limits:
+              memory: 600Mi
+            requests:
+              memory: 300Mi
+      volumes:
+        # 开发者维护: 宿主机中的日志路径
+        - name: log
+          hostPath:
+            path: /var/data/PROJECT_NAME-ENVIRONMENT/SERVICE_NAME
+            type: DirectoryOrCreate
+        # 开发者维护: 
+        # 数据库配置,需提前在跳板机从文件创建好configmap,或在rancher上手动维护
+        # 创建命令: kubectl create configmap congfigmapName --from-file=config.yaml -n namespace
+        - name: config
+          configMap:
+            name: configmapName
+            items:
+            - key: config.yaml
+              path: config.yaml

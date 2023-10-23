@@ -1,0 +1,138 @@
+name: cicd
+
+on: 
+  workflow_dispatch: # 触发流水线机制 手动触发
+    inputs:
+      projectname:
+        description: '项目名'     
+        required: true
+        # 开发者维护 具体项目名
+        default: 'project'
+      servicename:
+        description: '服务名'     
+        required: true
+        # 开发者维护 具体服务名
+        default: 'service' 
+      environment:
+        description: '部署环境'
+        required: true
+        default: dev
+        type: choice
+        options:
+        - dev
+        - test
+        - prod
+      comment:
+        description: '发布备注'     
+        required: false
+        default: '新需求特性;自测结果;提测结果'
+
+env:
+  # 默认参数作为secret存在github中
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  AWS_REGISTRY_KEY_NAME: ${{ secrets.AWS_REGISTRY_KEY_NAME }}
+  CLUSTER_NAME: mimo # EKS集群名
+  # 环境
+  ENVIRONMENT: ${{ github.event.inputs.environment }}
+  # 业务服务参数
+  PROJECT_NAME: ${{ github.event.inputs.projectname }}
+  SERVICE_NAME: ${{ github.event.inputs.servicename }}
+
+
+jobs:
+  cicd:
+    name: Continue Integration and Delivery # 持续集成与交付: 检出代码构造镜像推送至ECR并部署到EKS集群
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Configure AWS credentials # 配置aws
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR # 终端登录ecr
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+      
+    - name: Checkout # 检出分支
+      uses: actions/checkout@v3
+
+    - name: Extract origin branch name # 发布到dev/test环境就拿分支;发布到prod环境就拿Tag
+      id: extract_origin_branch
+      shell: bash
+      run: |
+        if [ $ENVIRONMENT == "dev" ]
+        then
+          echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+        elif [ $ENVIRONMENT == "test" ]
+        then
+          echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+        else
+          echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/tags/})"
+        fi
+
+    - name: Extract branch name # 处理斜杠
+      id: extract_branch
+      shell: bash
+      run: |
+         echo "##[set-output name=branch;]$(echo ${{ steps.extract_origin_branch.outputs.branch }} | sed 's/\//_/g')" 
+
+    - name: Extract github sha # 拿github sha 并截取10位
+      id: extract_github_sha
+      shell: bash
+      run: |
+        echo "##[set-output name=githubsha;]$(echo ${GITHUB_SHA:0:10})"
+
+    - name: Extract image tag # 提取镜像tag 命名规则 [分支名/Tag]_[GithubCommitSHA]
+      id: extract_image_tag
+      shell: bash
+      run: |
+        echo "##[set-output name=imagetag;]$(echo ${{ steps.extract_branch.outputs.branch }}_${{ steps.extract_github_sha.outputs.githubsha }})"
+
+    - name: Build, tag, and push image to Amazon ECR # 构建镜像,推送镜像到ecr仓库
+      id: build-image
+      run: |
+          docker build -t $ECR_REGISTRY/$SERVICE_NAME:${{ steps.extract_image_tag.outputs.imagetag }} -f deploy/docker/Dockerfile .
+          docker push $ECR_REGISTRY/$SERVICE_NAME:${{ steps.extract_image_tag.outputs.imagetag }}
+
+    # 模版生成逻辑
+    # 命名空间=项目名-环境名
+    # deployment名称=服务名-deployment
+    # service名称=服务名-service
+    # 容器名=服务名 
+    # 端口名=服务名
+
+    # 需要注意: 对于之前用jenkins部署的服务,容器名=服务名-container,现在改成新的命名机制,如果要适配老的服务,则需要把之前部署的deployment删掉(或者手动把deployment修改下容器名),然后再通过github action发布服务;目前mimo项目的api、task服务已经适配完毕
+
+    - name: Generate and apply the yaml config to deploy mimo on EKS # 应用配置部署到EKS集群: 如果是第一次部署,则从模版生成配置文件并初始化服务;如果已存在该服务,则只更新镜像信息
+      run: |
+        aws eks update-kubeconfig --name $CLUSTER_NAME
+        name=`kubectl get deployment -n $PROJECT_NAME-$ENVIRONMENT|grep -v NAME|grep $SERVICE_NAME-deployment|awk '{printf($1)}'`
+        if [[ -z $name  ]];then
+          echo 'create service.'
+          sed -i "s/TAG_NAME/${{ steps.extract_image_tag.outputs.imagetag }}/g" deploy/k8s/k8s.yaml   
+          sed -i "s/ECR_REGISTRY/$ECR_REGISTRY/g" deploy/k8s/k8s.yaml   
+          sed -i "s/AWS_REGISTRY_KEY_NAME/$AWS_REGISTRY_KEY_NAME/g" deploy/k8s/k8s.yaml 
+          sed -i "s/SERVICE_NAME/$SERVICE_NAME/g" deploy/k8s/k8s.yaml   
+          sed -i "s/PROJECT_NAME/$PROJECT_NAME/g" deploy/k8s/k8s.yaml 
+          sed -i "s/ENVIRONMENT/$ENVIRONMENT/g" deploy/k8s/k8s.yaml 
+          kubectl apply -f deploy/k8s/k8s.yaml
+        else
+          echo 'update service image.'
+          kubectl set image deployment/$SERVICE_NAME-deployment $SERVICE_NAME=$ECR_REGISTRY/$SERVICE_NAME:${{ steps.extract_image_tag.outputs.imagetag }} --record -n $PROJECT_NAME-$ENVIRONMENT
+        fi
+        sleep 10
+
+    - name: Extract Deploy Result # 输出部署结果
+      id: extract_deployment_result
+      shell: bash
+      run: echo "##[set-output name=result;]$(kubectl rollout status deployment/$SERVICE_NAME-deployment -n $PROJECT_NAME-$ENVIRONMENT)"
+
+    - name: Send Notification to Lark # 发送udp通知到notify服务
+      run: |
+        echo "echo -n '{\"api\":\"m_1691395720\",\"time\":1691397277,\"data\":[\"【Github Action】 \n操作者: $GITHUB_ACTOR\n环境名称: $ENVIRONMENT\n项目名称: $PROJECT_NAME\n服务名称: $SERVICE_NAME\n分支名称: ${{ steps.extract_origin_branch.outputs.branch }}\n镜像名称: $ECR_REGISTRY/$SERVICE_NAME:${{ steps.extract_image_tag.outputs.imagetag }}\n发版备注: ${{ github.event.inputs.comment }}\n构建记录: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\n部署结果: ${{ steps.extract_deployment_result.outputs.result }}\n流水线结果: ${{ job.status }}\"],\"sign\":\"b68f5dcd4d2a3d778d282567208e8690\"}'| nc -u -w1 13.212.162.101 31164" > ./send.sh && /bin/bash ./send.sh
