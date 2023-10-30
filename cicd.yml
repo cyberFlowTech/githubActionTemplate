@@ -128,11 +128,11 @@ jobs:
         fi
         sleep 10
 
-    - name: Extract Deploy Result # 输出部署结果
+    - name: Extract Deploy Result # 拿部署结果
       id: extract_deployment_result
       shell: bash
-      run: echo "##[set-output name=result;]$(kubectl rollout status deployment/$SERVICE_NAME-deployment -n $PROJECT_NAME-$ENVIRONMENT)"
+      run: echo "##[set-output name=result;]$(echo $(kubectl rollout status deployment/$SERVICE_NAME-deployment -n $PROJECT_NAME-$ENVIRONMENT) | sed 's/\"//g')"
 
-    - name: Send Notification to Lark # 发送udp通知到notify服务
+    - name: Send Notification to Lark # 发送http通知到notify服务
       run: |
-        echo "echo -n '{\"api\":\"m_1691395720\",\"time\":1691397277,\"data\":[\"【Github Action】 \n操作者: $GITHUB_ACTOR\n环境名称: $ENVIRONMENT\n项目名称: $PROJECT_NAME\n服务名称: $SERVICE_NAME\n分支名称: ${{ steps.extract_origin_branch.outputs.branch }}\n镜像名称: $ECR_REGISTRY/$SERVICE_NAME:${{ steps.extract_image_tag.outputs.imagetag }}\n发版备注: ${{ github.event.inputs.comment }}\n构建记录: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\n部署结果: ${{ steps.extract_deployment_result.outputs.result }}\n流水线结果: ${{ job.status }}\"],\"sign\":\"b68f5dcd4d2a3d778d282567208e8690\"}'| nc -u -w1 13.212.162.101 31164" > ./send.sh && /bin/bash ./send.sh
+        curl -X POST -H Content-Type:application/json -H type:info -d '{"api":"m_1691395720","data":"### Github Action ###\n操作者: ${{ github.actor }}\n环境名称: ${{ env.ENVIRONMENT }}\n项目名称: ${{ env.PROJECT_NAME }}\n服务名称: ${{ env.SERVICE_NAME }}\n构建记录: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id  }}\n流水线结果: ${{ job.status }}\n分支名称: ${{ steps.extract_origin_branch.outputs.branch }}\n镜像名称: ${{ env.ECR_REGISTRY  }}/${{ env.SERVICE_NAME  }}:${{ steps.extract_image_tag.outputs.imagetag }}\n发版备注: ${{ github.event.inputs.comment }}\n部署结果: ${{ steps.extract_deployment_result.outputs.result }}"}' https://web3.mimo.immo/notify/notify
