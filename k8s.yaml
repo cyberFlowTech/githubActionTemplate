@@ -67,7 +67,7 @@ spec:
 
       containers:
         - image: ECR_REGISTRY/SERVICE_NAME:TAG_NAME
-          name: SERVICE_NAME
+          name: SERVICE_NAME-container
           imagePullPolicy: Always # 由于image的tag添加了github.sha,每次镜像都会不同
           
           ports:
